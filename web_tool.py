@@ -1,7 +1,149 @@
+# ==============================================================================
+#
+#  Downloader Web UI - Main Application
+#  - Now with integrated dependency management -
+#
+# ==============================================================================
+
+import os
+import sys
+import platform
+import subprocess
+import requests
+import zipfile
+import io
+import shutil
+import threading
+import queue
+import re
+import json
+import atexit
+import datetime
+import time
+import signal
 from flask import Flask, request, render_template, jsonify, redirect, url_for
-import threading, queue, subprocess, os, re, json, atexit, datetime, time, signal
-import io, shutil, unicodedata, requests
 from zipfile import ZipFile, ZIP_DEFLATED
+
+# --- Dependency Management & Startup Checks (Runs on every start) ---
+
+def _print_header(title):
+    """Prints a formatted header to the console."""
+    print("\n" + "="*50)
+    print(f" {title}")
+    print("="*50)
+
+def _print_status(message, is_ok=True):
+    """Prints a status message with a checkmark or cross."""
+    symbol = "[✓]" if is_ok else "[✗]"
+    print(f" {symbol} {message}")
+
+def _run_command(command, message, silent=True):
+    """Runs a command, printing a message and handling errors."""
+    print(f" ▶️  {message}")
+    try:
+        stdout_pipe = subprocess.DEVNULL if silent else None
+        subprocess.check_call(command, stdout=stdout_pipe, stderr=subprocess.STDOUT)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"    ERROR: {e}")
+        return False
+
+def _manage_windows_dependencies():
+    """Handles downloading and updating dependencies for Windows."""
+    _print_header("Checking Windows Dependencies")
+    
+    deps_dir_name = "deps"
+    app_root = os.path.dirname(os.path.abspath(__file__))
+    deps_dir = os.path.join(app_root, deps_dir_name)
+    os.makedirs(deps_dir, exist_ok=True)
+
+    yt_dlp_path = os.path.join(deps_dir, 'yt-dlp.exe')
+    ffmpeg_path = os.path.join(deps_dir, 'ffmpeg.exe')
+
+    # 1. Check/Install yt-dlp
+    if not os.path.exists(yt_dlp_path):
+        print(" ▶️  yt-dlp not found. Downloading...")
+        try:
+            url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+            r = requests.get(url, stream=True)
+            r.raise_for_status()
+            with open(yt_dlp_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
+            _print_status("yt-dlp downloaded successfully.")
+        except Exception as e:
+            _print_status(f"Failed to download yt-dlp: {e}", is_ok=False)
+            sys.exit(1)
+    
+    # 2. Update yt-dlp
+    if not _run_command([yt_dlp_path, "-U"], "Updating yt-dlp...", silent=False):
+        _print_status("Could not update yt-dlp. It might be in use or there could be a network issue.", is_ok=False)
+    else:
+        _print_status("yt-dlp is up to date.")
+
+    # 3. Check/Install FFmpeg
+    if not os.path.exists(ffmpeg_path):
+        print(" ▶️  FFmpeg not found. Downloading...")
+        try:
+            url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+            r = requests.get(url, stream=True)
+            r.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                for file_info in z.infolist():
+                    if file_info.filename.endswith('bin/ffmpeg.exe'):
+                        with z.open(file_info) as source, open(ffmpeg_path, 'wb') as target:
+                            shutil.copyfileobj(source, target)
+                        _print_status("FFmpeg downloaded and extracted successfully.")
+                        break
+        except Exception as e:
+            _print_status(f"Failed to download or extract FFmpeg: {e}", is_ok=False)
+            sys.exit(1)
+    else:
+        _print_status("FFmpeg found.")
+    
+    # Add the local deps folder to the PATH for this session
+    os.environ['PATH'] = deps_dir + os.pathsep + os.environ['PATH']
+    _print_status("Local dependency path configured.")
+
+def _manage_linux_dependencies():
+    """Checks for dependencies on Linux and provides instructions if missing."""
+    _print_header("Checking Linux Dependencies")
+    ffmpeg_ok = shutil.which("ffmpeg") is not None
+    ytdlp_ok = shutil.which("yt-dlp") is not None
+
+    _print_status("Checking for FFmpeg...", is_ok=ffmpeg_ok)
+    _print_status("Checking for yt-dlp...", is_ok=ytdlp_ok)
+
+    if not all([ffmpeg_ok, ytdlp_ok]):
+        print("\n[!] Some system dependencies are missing!")
+        print("    If you are running for the first time, please run the setup script:")
+        print(f"    sudo bash {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'install.sh')}")
+        sys.exit(1)
+
+def run_startup_checks():
+    """Main function to run all pre-flight checks."""
+    if platform.system() == "Windows":
+        _manage_windows_dependencies()
+    elif platform.system() == "Linux":
+        _manage_linux_dependencies()
+    else:
+        print(f"Unsupported OS: {platform.system()}. Manual installation of ffmpeg and yt-dlp is required.")
+
+    _print_header("Checking Python Packages")
+    if not _run_command([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], "Installing/updating Python packages..."):
+         _print_status("Failed to install Python packages. Please check your Python/pip installation.", is_ok=False)
+         sys.exit(1)
+    else:
+        _print_status("Python packages are up to date.")
+    
+    _print_header("Pre-flight checks complete. Starting application.")
+
+# --- Run all checks before the application is defined ---
+run_startup_checks()
+
+# ==============================================================================
+#
+#  Flask Application Logic (Original Code)
+#
+# ==============================================================================
 
 app = Flask(__name__)
 
